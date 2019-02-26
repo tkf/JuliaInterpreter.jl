@@ -721,36 +721,66 @@ function optimize!(code::CodeInfo, mod::Module)
                 uuid = uuid4()
                 ustr = replace(string(uuid), '-'=>'_')
                 methname = Symbol("llvmcall_", ustr)
-                nargs = length(stmt.args)-4
-                argnames = [Symbol("arg", string(i)) for i = 1:nargs]
-                # Run a mini-interpreter to extract the types
-                framecode = JuliaFrameCode(CompiledCalls, code; optimize=false)
-                frame = prepare_locals(framecode, [])
-                idxstart = idx
-                for i = 2:4
-                    idxstart = smallest_ref(code.code, stmt.args[i], idxstart)
-                end
-                frame.pc[] = JuliaProgramCounter(idxstart)
-                while true
-                    pc = step_expr!(Compiled(), frame)
-                    convert(Int, pc) == idx && break
-                    pc === nothing && error("this should never happen")
-                end
-                str, RetType, ArgType = @lookup(frame, stmt.args[2]), @lookup(frame, stmt.args[3]), @lookup(frame, stmt.args[4])
-                def = quote
-                    function $methname($(argnames...))
-                        return Base.llvmcall($str, $RetType, $ArgType, $(argnames...))
-                    end
-                end
-                f = Core.eval(CompiledCalls, def)
-                stmt.args[1] = QuoteNode(f)
-                deleteat!(stmt.args, 2:4)
+                build_compiled_call!(stmt, methname, Base.llvmcall, stmt.args[2:4], code, idx, length(stmt.args)-4)
                 methodtables[idx] = Compiled()
             end
+        elseif isexpr(stmt, :foreigncall)
+            f = lookup_stmt(code.code, stmt.args[1])
+            if isa(f, Ptr)
+                f = string(uuid4())
+            elseif isexpr(f, :call)
+                @assert length(f.args) == 3
+                f = Symbol(f.args[2].value, '_', f.args[3].value)
+            end
+            fparent = stmt.args[4].value
+            methname = Symbol(fparent, '_', f)
+            @show stmt
+            build_compiled_call!(stmt, methname, fparent, stmt.args[1:3], code, idx, stmt.args[5])
+            @show stmt
+            methodtables[idx] = Compiled()
         end
     end
 
     return code, methodtables
+end
+
+# Handle :llvmcall & :foreigncall (issue #28)
+function build_compiled_call!(stmt, methname, fcall, typargs, code, idx, nargs)
+    argnames = [Symbol("arg", string(i)) for i = 1:nargs]
+    # Run a mini-interpreter to extract the types
+    framecode = JuliaFrameCode(CompiledCalls, code; optimize=false)
+    frame = prepare_locals(framecode, [])
+    idxstart = idx
+    for arg in typargs
+        idxstart = smallest_ref(code.code, arg, idxstart)
+    end
+    @show idx idxstart
+    frame.pc[] = JuliaProgramCounter(idxstart)
+    if idxstart < idx
+        while true
+            pc = step_expr!(Compiled(), frame)
+            convert(Int, pc) == idx && break
+            pc === nothing && error("this should never happen")
+        end
+    end
+    callinfo, RetType, ArgType = @lookup(frame, typargs[1]), @lookup(frame, typargs[2]), @lookup(frame, typargs[3])
+    if isa(callinfo, Symbol)
+        callinfo = QuoteNode(callinfo)
+    end
+    @show callinfo RetType ArgType typeof(ArgType)
+    if isa(ArgType, SimpleVector)
+        ArgType = (ArgType...,)
+    end
+    @show ArgType fcall typeof(fcall)
+    def = quote
+        function $methname($(argnames...))
+            return $fcall($callinfo, $RetType, $ArgType, $(argnames...))
+        end
+    end
+    @show def
+    f = Core.eval(CompiledCalls, def)
+    stmt.args[1] = QuoteNode(f)
+    deleteat!(stmt.args, 2:length(stmt.args)-nargs)
 end
 
 function prepare_locals(framecode, argvals::Vector{Any})
