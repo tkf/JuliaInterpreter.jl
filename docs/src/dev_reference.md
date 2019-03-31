@@ -61,6 +61,7 @@ breakpoint
 enable
 disable
 remove
+toggle
 break_on
 break_off
 JuliaInterpreter.dummy_breakpoint
