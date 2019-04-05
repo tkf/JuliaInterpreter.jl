@@ -516,3 +516,10 @@ end
 # Test exception type for undefined variables
 f() = s = s + 1
 @test_throws UndefVarError @interpret f()
+
+# Test JuliaInterpreter version of #265
+f(x) = x
+g(x) = f(x)
+@test (@interpret g(5)) == g(5)
+f(x) = x*x
+@test (@interpret g(5)) == g(5)
